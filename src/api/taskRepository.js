@@ -1,18 +1,15 @@
+const RequestClient = require('./requestClient');
+
 class TaskRepository {
   constructor({ baseUrl, userId, activityId, fetch }) {
     this.baseUrl = baseUrl;
     this.userId = userId;
     this.activityId = activityId;
-    this.fetch = fetch || globalThis.fetch;
+    this.client = new RequestClient({ baseUrl, fetch });
   }
 
   async getTasks() {
-    const url = `${this.baseUrl}/api/tasks`;
-    const response = await this.fetch(url, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    const payload = await response.json();
+    const { response, payload } = await this.client.get('/api/tasks');
     if (!response.ok || payload.code !== 0) {
       throw new Error('Failed to fetch tasks');
     }
@@ -20,13 +17,9 @@ class TaskRepository {
   }
 
   async completeTask(taskId, type, extra) {
-    const url = `${this.baseUrl}/api/tasks/complete`;
-    const response = await this.fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ taskId, type, extra, userId: this.userId, activityId: this.activityId }),
+    const { response, payload } = await this.client.post('/api/tasks/complete', {
+      body: { taskId, type, extra, userId: this.userId, activityId: this.activityId },
     });
-    const payload = await response.json();
     if (!response.ok || payload.code !== 0) {
       throw new Error('Failed to complete task');
     }
@@ -34,13 +27,9 @@ class TaskRepository {
   }
 
   async claimReward(taskId) {
-    const url = `${this.baseUrl}/api/tasks/claim`;
-    const response = await this.fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ taskId, userId: this.userId, activityId: this.activityId }),
+    const { response, payload } = await this.client.post('/api/tasks/claim', {
+      body: { taskId, userId: this.userId, activityId: this.activityId },
     });
-    const payload = await response.json();
     if (!response.ok || payload.code !== 0) {
       throw new Error('Failed to claim reward');
     }
@@ -48,13 +37,9 @@ class TaskRepository {
   }
 
   async reportProgress(taskId, progress) {
-    const url = `${this.baseUrl}/api/tasks/progress`;
-    const response = await this.fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ taskId, progress, userId: this.userId, activityId: this.activityId }),
+    const { response, payload } = await this.client.post('/api/tasks/progress', {
+      body: { taskId, progress, userId: this.userId, activityId: this.activityId },
     });
-    const payload = await response.json();
     if (!response.ok || payload.code !== 0) {
       throw new Error('Failed to report progress');
     }
