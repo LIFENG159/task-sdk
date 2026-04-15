@@ -7,10 +7,14 @@ const buildUrl = (baseUrl, path) => {
 class RequestClient {
   constructor({ baseUrl, fetch }) {
     this.baseUrl = baseUrl;
-    this.fetch = fetch || globalThis.fetch;
+    const fetchImpl = fetch || globalThis.fetch;
+    this.fetch = fetchImpl ? fetchImpl.bind(globalThis) : null;
   }
 
   async get(path, { headers } = {}) {
+    if (!this.fetch) {
+      throw new Error('Fetch is not available');
+    }
     const response = await this.fetch(buildUrl(this.baseUrl, path), {
       method: 'GET',
       headers: { 'Content-Type': 'application/json', ...(headers || {}) },
@@ -20,6 +24,9 @@ class RequestClient {
   }
 
   async post(path, { body, headers } = {}) {
+    if (!this.fetch) {
+      throw new Error('Fetch is not available');
+    }
     const response = await this.fetch(buildUrl(this.baseUrl, path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(headers || {}) },

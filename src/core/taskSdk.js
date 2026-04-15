@@ -2,7 +2,7 @@ const TaskRepository = require('../api/taskRepository');
 const TaskStore = require('../features/taskStore');
 const TaskTimerManager = require('../features/taskTimerManager');
 const { TASK_TYPES, TASK_STATUS } = require('../enums/taskTypes');
-const { now, getRemainingSeconds } = require('../common/taskUtils');
+const { now, getDayKey, getRemainingSeconds } = require('../common/taskUtils');
 const { createMemoryStorage } = require('../common/storage');
 const { createCallbacks } = require('../components/callbacks');
 
@@ -31,9 +31,9 @@ class TaskSdk {
     try {
       const tasks = await this.repository.getTasks();
       this.store.setTasks(tasks);
-      this.callbacks.onTasksUpdated(this.store.getTasks());
       this.restoreDelayedClaims();
       this.restoreCountdownTasks();
+      this.callbacks.onTasksUpdated(this.store.getTasks());
       return tasks;
     } catch (error) {
       this.handleError(error, { action: 'fetchTasks' });
@@ -98,6 +98,9 @@ class TaskSdk {
         this.callbacks.onRewardClaimed(taskId, payload.reward);
       }
       if (saved) {
+        if (saved.type === TASK_TYPES.DELAYED_CLAIM && saved.status === TASK_STATUS.CLAIMED) {
+          this.clearDelayedClaimState(saved.id);
+        }
         this.emitTaskStatus(saved);
       }
       return payload;
@@ -151,11 +154,12 @@ class TaskSdk {
   // 延迟领取任务：到期后变为可领取。
   startDelayedClaim(task) {
     const delay = task.config && task.config.claimDelaySeconds ? task.config.claimDelaySeconds : 0;
-    const key = this.getDelayedClaimKey(task.id);
-    const storedStartedAt = Number(this.storage.getItem(key));
-    const startedAt = storedStartedAt || now();
-    if (!storedStartedAt) {
-      this.storage.setItem(key, startedAt);
+    const storedState = this.getDelayedClaimState(task.id);
+    let startedAt = storedState.startedAt;
+    const todayKey = getDayKey();
+    if (!storedState.startedAt || storedState.dayKey !== todayKey) {
+      startedAt = now();
+      this.setDelayedClaimState(task.id, { startedAt, dayKey: todayKey });
     }
 
     const remaining = getRemainingSeconds(startedAt, delay);
@@ -163,10 +167,12 @@ class TaskSdk {
       const claimable = this.store.updateTask(task.id, (current) => ({
         ...current,
         status: TASK_STATUS.CLAIMABLE,
+        progress: { ...(current.progress || {}), remainingSeconds: 0, startedAt },
       }));
       if (claimable) {
         this.emitTaskStatus(claimable);
       }
+      this.completeTask(task.id, { autoClaimable: true });
       return;
     }
 
@@ -180,6 +186,13 @@ class TaskSdk {
     }
 
     this.timerManager.startCountdown(task.id, remaining, {
+      onTick: (id, nextRemaining) => {
+        this.store.updateTask(id, (current) => ({
+          ...current,
+          progress: { ...(current.progress || {}), remainingSeconds: nextRemaining },
+        }));
+        this.callbacks.onCountdownTick(id, nextRemaining);
+      },
       onComplete: (id) => {
         const claimable = this.store.updateTask(id, (current) => ({
           ...current,
@@ -188,6 +201,7 @@ class TaskSdk {
         if (claimable) {
           this.emitTaskStatus(claimable);
         }
+        this.completeTask(id, { autoClaimable: true });
       },
     });
   }
@@ -199,26 +213,45 @@ class TaskSdk {
       if (task.type !== TASK_TYPES.DELAYED_CLAIM) {
         return;
       }
-      const key = this.getDelayedClaimKey(task.id);
-      const storedStartedAt = Number(this.storage.getItem(key));
-      if (!storedStartedAt) {
+      const storedState = this.getDelayedClaimState(task.id);
+      if (!storedState.startedAt) {
+        return;
+      }
+      const todayKey = getDayKey();
+      const stateDayKey = storedState.dayKey || getDayKey(storedState.startedAt);
+      if (stateDayKey !== todayKey) {
+        this.clearDelayedClaimState(task.id);
         return;
       }
       const delay = task.config && task.config.claimDelaySeconds ? task.config.claimDelaySeconds : 0;
-      const remaining = getRemainingSeconds(storedStartedAt, delay);
+      const remaining = getRemainingSeconds(storedState.startedAt, delay);
       if (remaining <= 0) {
-        this.store.updateTask(task.id, (current) => ({
+        const claimable = this.store.updateTask(task.id, (current) => ({
           ...current,
           status: TASK_STATUS.CLAIMABLE,
+          progress: { ...(current.progress || {}), remainingSeconds: 0, startedAt: storedState.startedAt },
         }));
-        this.emitTaskStatus(this.store.getTaskById(task.id));
+        if (claimable) {
+          this.emitTaskStatus(claimable);
+        }
+        this.completeTask(task.id, { autoClaimable: true });
       } else {
-        this.store.updateTask(task.id, (current) => ({
+        const updated = this.store.updateTask(task.id, (current) => ({
           ...current,
           status: TASK_STATUS.IN_PROGRESS,
-          progress: { remainingSeconds: remaining, startedAt: storedStartedAt },
+          progress: { remainingSeconds: remaining, startedAt: storedState.startedAt },
         }));
+        if (updated) {
+          this.emitTaskStatus(updated);
+        }
         this.timerManager.startCountdown(task.id, remaining, {
+          onTick: (id, nextRemaining) => {
+            this.store.updateTask(id, (current) => ({
+              ...current,
+              progress: { ...(current.progress || {}), remainingSeconds: nextRemaining },
+            }));
+            this.callbacks.onCountdownTick(id, nextRemaining);
+          },
           onComplete: (id) => {
             const claimable = this.store.updateTask(id, (current) => ({
               ...current,
@@ -227,10 +260,15 @@ class TaskSdk {
             if (claimable) {
               this.emitTaskStatus(claimable);
             }
+            this.completeTask(id, { autoClaimable: true });
           },
         });
       }
     });
+  }
+
+  clearDelayedClaimState(taskId) {
+    this.storage.removeItem(this.getDelayedClaimKey(taskId));
   }
 
   // 根据存储的开始时间恢复倒计时任务（浏览/滑动）。
@@ -316,7 +354,27 @@ class TaskSdk {
   }
 
   getDelayedClaimKey(taskId) {
-    return `task-sdk:${taskId}:startedAt`;
+    return `task-sdk:${taskId}:delayedClaimState`;
+  }
+
+  getDelayedClaimState(taskId) {
+    const raw = this.storage.getItem(this.getDelayedClaimKey(taskId));
+    if (!raw) {
+      return { startedAt: 0, dayKey: '' };
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const startedAt = Number(parsed.startedAt || 0);
+      const dayKey = typeof parsed.dayKey === 'string' ? parsed.dayKey : '';
+      return { startedAt, dayKey };
+    } catch (error) {
+      const fallbackStartedAt = Number(raw) || 0;
+      return { startedAt: fallbackStartedAt, dayKey: fallbackStartedAt ? getDayKey(fallbackStartedAt) : '' };
+    }
+  }
+
+  setDelayedClaimState(taskId, state) {
+    this.storage.setItem(this.getDelayedClaimKey(taskId), JSON.stringify(state));
   }
 
   getCountdownStartedAtKey(taskId) {
@@ -328,6 +386,9 @@ class TaskSdk {
       task.type !== TASK_TYPES.BROWSE_JUMP_COUNTDOWN &&
       task.type !== TASK_TYPES.BUBBLE_SCROLL_COUNTDOWN
     ) {
+      if (task.type === TASK_TYPES.DELAYED_CLAIM && task.status === TASK_STATUS.CLAIMED) {
+        this.clearDelayedClaimState(task.id);
+      }
       return;
     }
     if (task.status !== TASK_STATUS.COMPLETED && task.status !== TASK_STATUS.CLAIMED) {
